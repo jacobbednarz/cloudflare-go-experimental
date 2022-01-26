@@ -40,6 +40,10 @@ cloudflare.Email = "someone@example.com"
 // do stuff
 ```
 
+NOTE: setting these values at the top level (`cloudflare.Key` or
+`cloudflare.Token`) sets the value globally and overwrites individual client
+instantiations.
+
 **more advanced approach for initialising a new client with options like your
 own `http.Client` (recommended)**
 
