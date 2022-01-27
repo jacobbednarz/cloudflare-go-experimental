@@ -319,17 +319,3 @@ func copyHeader(target, source http.Header) {
 func isHTTPWriteMethod(method string) bool {
 	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
 }
-
-func normalizeURL(url string) string {
-	// All paths include a leading slash, so to keep logs pretty, trim a
-	// trailing slash on the URL.
-	url = strings.TrimSuffix(url, "/")
-
-	// For a long time we had the `/v1` suffix as part of a configured URL
-	// rather than in the per-package URLs throughout the library. Continue
-	// to support this for the time being by stripping one that's been
-	// passed for better backwards compatibility.
-	url = strings.TrimSuffix(url, "/v1")
-
-	return url
-}
