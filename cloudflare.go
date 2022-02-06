@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -34,11 +35,12 @@ const (
 )
 
 var (
-	Key            string
-	Email          string
-	UserServiceKey string
-	Token          string
-	Version        string = "dev"
+	ConfiguredClient *APIClient
+	Key              string
+	Email            string
+	UserServiceKey   string
+	Token            string
+	Version          string = "dev"
 )
 
 type RetryPolicy struct {
@@ -102,10 +104,13 @@ type ResultInfo struct {
 	Cursors    ResultInfoCursors `json:"cursors"`
 }
 
+// Call is the entrypoint to making API calls with the correct request setup.
 func (api *APIClient) Call(ctx context.Context, method, path string, payload interface{}) ([]byte, error) {
 	return api.makeRequest(ctx, method, path, payload, nil)
 }
 
+// CallWithHeaders is the entrypoint to making API calls with the correct
+// request setup and allows passing in additional HTTP headers with the request.
 func (api *APIClient) CallWithHeaders(ctx context.Context, method, path string, payload interface{}, headers http.Header) ([]byte, error) {
 	return api.makeRequest(ctx, method, path, payload, headers)
 }
@@ -149,6 +154,8 @@ func New(config *ClientParams) (*APIClient, error) {
 	if UserServiceKey != "" {
 		config.UserServiceKey = UserServiceKey
 	}
+
+	ConfiguredClient = &APIClient{*config}
 
 	return &APIClient{*config}, nil
 }
@@ -317,5 +324,19 @@ func copyHeader(target, source http.Header) {
 }
 
 func isHTTPWriteMethod(method string) bool {
-	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
+	return method != http.MethodGet && method != http.MethodHead
+}
+
+// FetchClient gets the currently configured client or initialises a new one
+// using the global parameters.
+//
+// Despite being exported, this should be used outside of the library as it is
+// intended to be internal. Use at your own risk.
+func FetchClient() *APIClient {
+	if !reflect.ValueOf(ConfiguredClient).IsNil() {
+		return ConfiguredClient
+	}
+
+	client, _ := New(&ClientParams{})
+	return client
 }
