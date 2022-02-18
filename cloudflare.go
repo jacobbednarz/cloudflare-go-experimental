@@ -10,11 +10,11 @@ import (
 	"log"
 	"math"
 	"net/http"
-	"reflect"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/imdario/mergo"
 	"github.com/pkg/errors"
 	"golang.org/x/time/rate"
 )
@@ -23,25 +23,59 @@ import (
 type RouteType string
 
 const (
-	APIHostname string = "api.cloudflare.com"
-	APIBasePath string = "/client/v4"
+	defaultScheme   = "https"
+	defaultHostname = "api.cloudflare.com"
+	defaultBasePath = "/client/v4"
+	userAgent       = "cloudflare-go"
 
 	AccountRouteType RouteType = "accounts"
 	ZoneRouteType    RouteType = "zones"
 
-	testAccountID    string = "01a7362d577a6c3019a474fd6f485823"
-	testZoneID       string = "d56084adb405e0b7e32c52321bf07be6"
-	testCertPackUUID string = "a77f8bd7-3b47-46b4-a6f1-75cf98109948"
+	testAccountID    = "01a7362d577a6c3019a474fd6f485823"
+	testZoneID       = "d56084adb405e0b7e32c52321bf07be6"
+	testCertPackUUID = "a77f8bd7-3b47-46b4-a6f1-75cf98109948"
 )
 
 var (
-	ConfiguredClient *APIClient
-	Key              string
-	Email            string
-	UserServiceKey   string
-	Token            string
-	Version          string = "dev"
+	Version string = "dev"
 )
+
+type service struct {
+	client *Client
+}
+
+type ClientParams struct {
+	Key            string
+	Email          string
+	UserServiceKey string
+	Token          string
+	BaseURL        *url.URL
+	UserAgent      string
+	Headers        http.Header
+	HTTPClient     *http.Client
+	RateLimiter    *rate.Limiter
+	RetryPolicy    RetryPolicy
+	Logger         Logger
+}
+
+// A Client manages communication with the Cloudflare API.
+type Client struct {
+	clientMu sync.Mutex
+
+	*ClientParams
+
+	common service // Reuse a single struct instead of allocating one for each service on the heap.
+
+	Zones *ZonesService
+}
+
+// Client returns the http.Client used by this Cloudflare client.
+func (c *Client) Client() *http.Client {
+	c.clientMu.Lock()
+	defer c.clientMu.Unlock()
+	clientCopy := *c.HTTPClient
+	return &clientCopy
+}
 
 type RetryPolicy struct {
 	MaxRetries    int
@@ -51,25 +85,6 @@ type RetryPolicy struct {
 
 type Logger interface {
 	Printf(format string, v ...interface{})
-}
-
-type APIClient struct {
-	ClientParams
-}
-
-type ClientParams struct {
-	Key            string
-	Email          string
-	UserServiceKey string
-	Token          string
-	Hostname       string
-	BasePath       string
-	UserAgent      string
-	Headers        http.Header
-	HTTPClient     *http.Client
-	RateLimiter    *rate.Limiter
-	RetryPolicy    RetryPolicy
-	Logger         Logger
 }
 
 // ResponseInfo contains a code and message returned by the API as errors or
@@ -105,62 +120,77 @@ type ResultInfo struct {
 }
 
 // Call is the entrypoint to making API calls with the correct request setup.
-func (api *APIClient) Call(ctx context.Context, method, path string, payload interface{}) ([]byte, error) {
-	return api.makeRequest(ctx, method, path, payload, nil)
+func (c *Client) Call(ctx context.Context, method, path string, payload interface{}) ([]byte, error) {
+	return c.makeRequest(ctx, method, path, payload, nil)
 }
 
 // CallWithHeaders is the entrypoint to making API calls with the correct
 // request setup and allows passing in additional HTTP headers with the request.
-func (api *APIClient) CallWithHeaders(ctx context.Context, method, path string, payload interface{}, headers http.Header) ([]byte, error) {
-	return api.makeRequest(ctx, method, path, payload, headers)
+func (c *Client) CallWithHeaders(ctx context.Context, method, path string, payload interface{}, headers http.Header) ([]byte, error) {
+	return c.makeRequest(ctx, method, path, payload, headers)
 }
 
 // New creates a new instance of the API client by merging ClientParams with the
 // default values.
-func New(config *ClientParams) (*APIClient, error) {
+func New(config *ClientParams) (*Client, error) {
+	c := &Client{ClientParams: &ClientParams{}}
+	c.common.client = c
+
 	silentLogger := log.New(ioutil.Discard, "", log.LstdFlags)
 
-	defaultAPI := &ClientParams{
-		Hostname:    APIHostname,
-		BasePath:    APIBasePath,
-		UserAgent:   "cloudflare-go/" + Version,
-		HTTPClient:  http.DefaultClient,
-		Headers:     make(http.Header),
-		RateLimiter: rate.NewLimiter(rate.Limit(4), 1), // 4rps equates to default api limit (1200 req/5 min)
-		RetryPolicy: RetryPolicy{
-			MaxRetries:    3,
-			MinRetryDelay: time.Duration(1) * time.Second,
-			MaxRetryDelay: time.Duration(30) * time.Second,
-		},
-		Logger: silentLogger,
+	defaultURL, _ := url.Parse(defaultScheme + "://" + defaultHostname + defaultBasePath)
+	if config.BaseURL == nil {
+		c.ClientParams.BaseURL = defaultURL
 	}
 
-	if err := mergo.Merge(config, defaultAPI); err != nil {
-		return nil, fmt.Errorf("failed to merge API configuration with defaults: %w", err)
+	if config.UserAgent == "" {
+		c.ClientParams.UserAgent = userAgent + "/" + Version
 	}
 
-	// Take the global values and override them in the instantiated client if they
-	// exist. This ensures a global authentication method has precedence over a
-	// local one.
-	if Key != "" {
-		config.Key = Key
-		config.Email = Email
+	if config.HTTPClient == nil {
+		c.ClientParams.HTTPClient = http.DefaultClient
 	}
 
-	if Token != "" {
-		config.Token = Token
+	if config.RateLimiter == nil {
+		c.ClientParams.RateLimiter = rate.NewLimiter(rate.Limit(4), 1) // 4rps equates to default api limit (1200 req/5 min)
 	}
 
-	if UserServiceKey != "" {
-		config.UserServiceKey = UserServiceKey
+	retryPolicy := RetryPolicy{
+		MaxRetries:    3,
+		MinRetryDelay: time.Duration(1) * time.Second,
+		MaxRetryDelay: time.Duration(30) * time.Second,
+	}
+	c.ClientParams.RetryPolicy = retryPolicy
+
+	if config.Headers == nil {
+		c.ClientParams.Headers = make(http.Header)
 	}
 
-	ConfiguredClient = &APIClient{*config}
+	if config.Logger == nil {
+		c.ClientParams.Logger = silentLogger
+	}
 
-	return &APIClient{*config}, nil
+	if config.Key != "" && config.Token != "" {
+		return nil, errors.New("API key and tokens are mutually exclusive")
+	}
+
+	if config.Key != "" {
+		c.ClientParams.Key = config.Key
+		c.ClientParams.Email = config.Email
+	}
+
+	if config.Token != "" {
+		c.ClientParams.Token = config.Token
+	}
+
+	if config.UserServiceKey != "" {
+		c.ClientParams.UserServiceKey = config.UserServiceKey
+	}
+
+	return c, nil
 }
 
-func (api *APIClient) makeRequest(ctx context.Context, method, uri string, params interface{}, headers http.Header) ([]byte, error) {
+func (c *Client) makeRequest(ctx context.Context, method, uri string, params interface{}, headers http.Header) ([]byte, error) {
 	var reqBody io.Reader
 	var err error
 
@@ -182,18 +212,18 @@ func (api *APIClient) makeRequest(ctx context.Context, method, uri string, param
 	var resp *http.Response
 	var respErr error
 	var respBody []byte
-	for i := 0; i <= api.RetryPolicy.MaxRetries; i++ {
+	for i := 0; i <= c.RetryPolicy.MaxRetries; i++ {
 		if i > 0 {
 			// expect the backoff introduced here on errored requests to dominate the effect of rate limiting
 			// don't need a random component here as the rate limiter should do something similar
 			// nb time duration could truncate an arbitrary float. Since our inputs are all ints, we should be ok
-			sleepDuration := time.Duration(math.Pow(2, float64(i-1)) * float64(api.RetryPolicy.MinRetryDelay))
+			sleepDuration := time.Duration(math.Pow(2, float64(i-1)) * float64(c.RetryPolicy.MinRetryDelay))
 
-			if sleepDuration > api.RetryPolicy.MaxRetryDelay {
-				sleepDuration = api.RetryPolicy.MaxRetryDelay
+			if sleepDuration > c.RetryPolicy.MaxRetryDelay {
+				sleepDuration = c.RetryPolicy.MaxRetryDelay
 			}
 			// useful to do some simple logging here, maybe introduce levels later
-			api.Logger.Printf("sleeping %s before retry attempt number %d for request %s %s", sleepDuration.String(), i, method, uri)
+			c.Logger.Printf("sleeping %s before retry attempt number %d for request %s %s", sleepDuration.String(), i, method, uri)
 
 			select {
 			case <-time.After(sleepDuration):
@@ -202,12 +232,12 @@ func (api *APIClient) makeRequest(ctx context.Context, method, uri string, param
 			}
 		}
 
-		err = api.RateLimiter.Wait(ctx)
+		err = c.RateLimiter.Wait(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("error caused by request rate limiting: %w", err)
 		}
 
-		resp, respErr = api.request(ctx, method, uri, reqBody, headers)
+		resp, respErr = c.request(ctx, method, uri, reqBody, headers)
 
 		// retry if the server is rate limiting us or if it failed
 		// assumes server operations are rolled back on failure
@@ -220,10 +250,10 @@ func (api *APIClient) makeRequest(ctx context.Context, method, uri string, param
 
 				respErr = errors.Wrap(err, "could not read response body")
 
-				api.Logger.Printf("Request: %s %s got an error response %d: %s\n", method, uri, resp.StatusCode,
+				c.Logger.Printf("Request: %s %s got an error response %d: %s\n", method, uri, resp.StatusCode,
 					strings.Replace(strings.Replace(string(respBody), "\n", "", -1), "\t", "", -1))
 			} else {
-				api.Logger.Printf("Error performing request: %s %s : %s \n", method, uri, respErr.Error())
+				c.Logger.Printf("Error performing request: %s %s : %s \n", method, uri, respErr.Error())
 			}
 			continue
 		} else {
@@ -267,8 +297,8 @@ func (api *APIClient) makeRequest(ctx context.Context, method, uri string, param
 // request makes a HTTP request to the given API endpoint, returning the raw
 // *http.Response, or an error if one occurred. The caller is responsible for
 // closing the response body.
-func (api *APIClient) request(ctx context.Context, method, uri string, reqBody io.Reader, headers http.Header) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, api.GetBaseURL()+uri, reqBody)
+func (api *Client) request(ctx context.Context, method, uri string, reqBody io.Reader, headers http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, api.BaseURL.String()+uri, reqBody)
 	if err != nil {
 		return nil, errors.Wrap(err, "HTTP request creation failed")
 	}
@@ -311,10 +341,6 @@ func (api *APIClient) request(ctx context.Context, method, uri string, reqBody i
 	return resp, nil
 }
 
-func (api *APIClient) GetBaseURL() string {
-	return "https://" + api.Hostname + api.BasePath
-}
-
 // copyHeader copies all headers for `source` and sets them on `target`.
 // based on https://godoc.org/github.com/golang/gddo/httputil/header#Copy
 func copyHeader(target, source http.Header) {
@@ -325,18 +351,4 @@ func copyHeader(target, source http.Header) {
 
 func isHTTPWriteMethod(method string) bool {
 	return method != http.MethodGet && method != http.MethodHead
-}
-
-// FetchClient gets the currently configured client or initialises a new one
-// using the global parameters.
-//
-// Despite being exported, this should be used outside of the library as it is
-// intended to be internal. Use at your own risk.
-func FetchClient() *APIClient {
-	if !reflect.ValueOf(ConfiguredClient).IsNil() {
-		return ConfiguredClient
-	}
-
-	client, _ := New(&ClientParams{})
-	return client
 }
