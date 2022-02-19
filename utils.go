@@ -1,5 +1,7 @@
 package cloudflare
 
+import "regexp"
+
 // Int64 returns a pointer to the int64 value passed in.
 func Int64(v int64) *int64 {
 	return &v
@@ -90,4 +92,9 @@ func Float64Slice(v []float64) []*float64 {
 		out[i] = &v[i]
 	}
 	return out
+}
+
+func isValidZoneIdentifier(s string) bool {
+	matches, _ := regexp.MatchString(`^[0-9a-fA-F]{32}$`, s)
+	return matches
 }

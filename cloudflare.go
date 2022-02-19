@@ -187,6 +187,8 @@ func New(config *ClientParams) (*Client, error) {
 		c.ClientParams.UserServiceKey = config.UserServiceKey
 	}
 
+	c.Zones = (*ZonesService)(&c.common)
+
 	return c, nil
 }
 

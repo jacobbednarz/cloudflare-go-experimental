@@ -8,11 +8,11 @@ An experimental fork of the cloudflare-go library. Not ready to be used.
 
 Majority of entities follow a standard method signature.
 
-- `Get(id)`: fetches a single entity by an identifer
-- `List(...params)`: fetches all entities and automatically paginates
-- `Create(...params)`: creates a new entity with the provided parameters
-- `Update(id, ...params)`: updates an existing entity
-- `Delete(id)`: deletes a single entity
+- `Get(ctx, id)`: fetches a single entity by an identifer
+- `List(ctx, ...params)`: fetches all entities and automatically paginates
+- `Create(ctx, ...params)`: creates a new entity with the provided parameters
+- `Update(ctx, id, ...params)`: updates an existing entity
+- `Delete(ctx, id)`: deletes a single entity
 
 ## Nested methods and services
 
@@ -62,7 +62,7 @@ zParams := &cloudflare.ZoneParams{
   Name: "example.com",
   AccountID: "d8e8fca2dc0f896fd7cb4cb0031ba249"
 }
-z, _ := c.Zones.New(zParams)
+z, _ := c.Zones.New(ctx, zParams)
 ```
 
 **fetching a known zone ID**
@@ -74,7 +74,7 @@ params := cloudflare.ClientParams{
 }
 c, err := cloudflare.New(params)
 
-z, _ := c.Zones.Get("3e7705498e8be60520841409ebc69bc1")
+z, _ := c.Zones.Get(ctx, "3e7705498e8be60520841409ebc69bc1")
 ```
 
 **fetching all zones matching a single account ID**
@@ -89,7 +89,7 @@ c, err := cloudflare.New(params)
 zParams := &cloudflare.ZoneParams{
   AccountID: "d8e8fca2dc0f896fd7cb4cb0031ba249"
 }
-z, _ := c.Zones.List(zParams)
+z, _ := c.Zones.List(ctx, zParams)
 ```
 
 **update a zone**
@@ -107,7 +107,7 @@ zParams := &cloudflare.ZoneParams{
     "ns2.example.com"
   })
 }
-z, _ := c.Zones.Update("b5163cf270a3fbac34827c4a2713eef4", zParams)
+z, _ := c.Zones.Update(ctx, "b5163cf270a3fbac34827c4a2713eef4", zParams)
 ```
 
 **delete a zone**
@@ -119,5 +119,5 @@ params := cloudflare.ClientParams{
 }
 c, err := cloudflare.New(params)
 
-z, _ := c.Zones.Delete("b5163cf270a3fbac34827c4a2713eef4")
+z, _ := c.Zones.Delete(ctx, "b5163cf270a3fbac34827c4a2713eef4")
 ```
